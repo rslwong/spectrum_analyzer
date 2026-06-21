@@ -14,6 +14,8 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_st7701.h"
 #include "esp_lvgl_port.h"
+#include "esp_lcd_touch_gt911.h"
+#include "esp_lvgl_port_touch.h"
 
 #include "driver/i2c_master.h"
 #include "driver/i2s_std.h"
@@ -80,7 +82,69 @@ static const st7701_lcd_init_cmd_t lcd_init_cmds[] = {
     {0x29, (uint8_t []){0x00}, 1, 20},
 };
 
-void bsp_display_start(void)
+static i2c_master_bus_handle_t s_i2c_bus = NULL;
+
+static void init_i2c_bus(void)
+{
+    if (s_i2c_bus != NULL) {
+        return;
+    }
+    i2c_master_bus_config_t i2c_cfg = {
+        .i2c_port = I2C_NUM_0,
+        .sda_io_num = I2C_SDA_GPIO,
+        .scl_io_num = I2C_SCL_GPIO,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_cfg, &s_i2c_bus));
+}
+
+static esp_lcd_touch_handle_t s_touch_handle = NULL;
+static lv_indev_t *s_touch_indev = NULL;
+
+static void bsp_touch_init(lv_display_t *disp)
+{
+    init_i2c_bus();
+
+    // 1. Configure the I2C panel IO
+    esp_lcd_panel_io_handle_t tp_io = NULL;
+    esp_lcd_panel_io_i2c_config_t tp_io_cfg = ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG();
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(s_i2c_bus, &tp_io_cfg, &tp_io));
+
+    // 2. Configure touch settings
+    esp_lcd_touch_config_t tp_cfg = {
+        .x_max = LCD_H_RES,
+        .y_max = LCD_V_RES,
+        .rst_gpio_num = -1,
+        .int_gpio_num = -1,
+        .levels = {
+            .reset = 0,
+            .interrupt = 0,
+        },
+        .flags = {
+            .swap_xy = 0,
+            .mirror_x = 0,
+            .mirror_y = 0,
+        },
+    };
+
+    ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_gt911(tp_io, &tp_cfg, &s_touch_handle));
+
+    // 3. Register touch with LVGL port
+    lvgl_port_touch_cfg_t touch_cfg = {
+        .disp = disp,
+        .handle = s_touch_handle,
+        .scale = {
+            .x = 1.0f,
+            .y = 1.0f,
+        }
+    };
+    s_touch_indev = lvgl_port_add_touch(&touch_cfg);
+    assert(s_touch_indev != NULL);
+}
+
+lv_display_t *bsp_display_start(void)
 {
     // 1. Power the MIPI D-PHY via internal LDO ch3 @ 2.5 V (§4)
     esp_ldo_channel_handle_t ldo = NULL;
@@ -155,8 +219,10 @@ void bsp_display_start(void)
     // ponytail: avoid_tearing off on purpose — its DPI path uses the deprecated
     // on_refresh_done callback, which never fires on IDF 6.1 and hangs LVGL.
     lvgl_port_display_dsi_cfg_t dsi_disp_cfg = { .flags.avoid_tearing = false };
-    lvgl_port_add_disp_dsi(&disp_cfg, &dsi_disp_cfg);
+    lv_display_t *disp = lvgl_port_add_disp_dsi(&disp_cfg, &dsi_disp_cfg);
     ESP_LOGI(TAG, "display up: %dx%d", LCD_H_RES, LCD_V_RES);
+    bsp_touch_init(disp);
+    return disp;
 }
 
 bool bsp_lvgl_lock(int timeout_ms) { return lvgl_port_lock(timeout_ms); }
@@ -165,16 +231,7 @@ void bsp_lvgl_unlock(void) { lvgl_port_unlock(); }
 esp_codec_dev_handle_t bsp_mic_start(void)
 {
     // Shared I2C control bus (also the touch bus, but we don't use touch here)
-    i2c_master_bus_handle_t i2c_bus = NULL;
-    i2c_master_bus_config_t i2c_cfg = {
-        .i2c_port = I2C_NUM_0,
-        .sda_io_num = I2C_SDA_GPIO,
-        .scl_io_num = I2C_SCL_GPIO,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_cfg, &i2c_bus));
+    init_i2c_bus();
 
     // I2S STD, master, RX only (codec is the I2S slave). esp_codec_dev
     // enables/disables the channel on open/close, so leave it un-enabled.
@@ -199,7 +256,7 @@ esp_codec_dev_handle_t bsp_mic_start(void)
         .port = I2S_NUM_0, .rx_handle = rx, .tx_handle = NULL,
     });
     const audio_codec_ctrl_if_t *ctrl_if = audio_codec_new_i2c_ctrl(&(audio_codec_i2c_cfg_t){
-        .port = I2C_NUM_0, .addr = ES8311_CODEC_DEFAULT_ADDR, .bus_handle = i2c_bus,
+        .port = I2C_NUM_0, .addr = ES8311_CODEC_DEFAULT_ADDR, .bus_handle = s_i2c_bus,
     });
     es8311_codec_cfg_t es_cfg = {
         .ctrl_if = ctrl_if,

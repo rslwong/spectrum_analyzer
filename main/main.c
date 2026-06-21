@@ -9,6 +9,8 @@
 #include "esp_dsp.h"
 #include "lvgl.h"
 #include "board.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 
 #define FFT_N        1024                 // 64 ms frame @ 16 kHz -> ~15 fps
 #define HALF_N       (FFT_N / 2)
@@ -40,6 +42,143 @@ static int   bar_lo[N_BARS], bar_hi[N_BARS];  // bin range per bar
 static lv_obj_t *bars[N_BARS], *peaks[N_BARS];
 static lv_obj_t *lbl_freq, *lbl_status, *level_bar;
 static int peak_px[N_BARS], bar_px[N_BARS];
+
+// Settings UI variables
+static lv_obj_t *settings_modal = NULL;
+static lv_obj_t *gain_slider = NULL;
+static lv_obj_t *gain_val_lbl = NULL;
+static lv_obj_t *setting_level_bar = NULL;
+
+static esp_codec_dev_handle_t mic_handle = NULL;
+static float current_mic_gain = 30.0f;
+
+static void load_gain_from_nvs(void)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
+    if (err == ESP_OK) {
+        int32_t val = 30;
+        err = nvs_get_i32(my_handle, "mic_gain", &val);
+        if (err == ESP_OK) {
+            current_mic_gain = (float)val;
+        }
+        nvs_close(my_handle);
+    }
+}
+
+static void save_gain_to_nvs(float gain)
+{
+    nvs_handle_t my_handle;
+    esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
+    if (err == ESP_OK) {
+        nvs_set_i32(my_handle, "mic_gain", (int32_t)gain);
+        nvs_commit(my_handle);
+        nvs_close(my_handle);
+    }
+}
+
+static void slider_event_cb(lv_event_t * e)
+{
+    lv_obj_t * slider = lv_event_get_target(e);
+    int32_t val = lv_slider_get_value(slider);
+    current_mic_gain = (float)val;
+    if (mic_handle) {
+        esp_codec_dev_set_in_gain(mic_handle, current_mic_gain);
+    }
+    lv_label_set_text_fmt(gain_val_lbl, "%+d dB", (int)val);
+}
+
+static void close_click_cb(lv_event_t * e)
+{
+    if (settings_modal) {
+        save_gain_to_nvs(current_mic_gain);
+        lv_obj_delete(settings_modal);
+        settings_modal = NULL;
+        gain_slider = NULL;
+        gain_val_lbl = NULL;
+        setting_level_bar = NULL;
+    }
+}
+
+static void settings_click_cb(lv_event_t * e)
+{
+    if (settings_modal != NULL) return; // already open
+    
+    lv_obj_t *scr = lv_scr_act();
+    
+    // Modal background
+    settings_modal = lv_obj_create(scr);
+    lv_obj_set_size(settings_modal, SCR_W, 800); // cover screen
+    lv_obj_align(settings_modal, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(settings_modal, lv_color_hex(0x111111), 0);
+    lv_obj_set_style_bg_opa(settings_modal, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(settings_modal, 0, 0);
+    lv_obj_set_style_radius(settings_modal, 0, 0);
+    lv_obj_add_flag(settings_modal, LV_OBJ_FLAG_CLICKABLE); // prevent clicking through
+    
+    // Modal Title
+    lv_obj_t *title = lv_label_create(settings_modal);
+    lv_label_set_text(title, "MIC SENSITIVITY");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x00E0FF), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 80);
+    
+    // Slider label
+    lv_obj_t *lbl_slider_title = lv_label_create(settings_modal);
+    lv_label_set_text(lbl_slider_title, "Adjust Input Gain");
+    lv_obj_set_style_text_color(lbl_slider_title, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(lbl_slider_title, &lv_font_montserrat_20, 0);
+    lv_obj_align(lbl_slider_title, LV_ALIGN_TOP_MID, 0, 180);
+    
+    // Slider
+    gain_slider = lv_slider_create(settings_modal);
+    lv_obj_set_size(gain_slider, PLOT_W - 40, 24);
+    lv_obj_align(gain_slider, LV_ALIGN_TOP_MID, 0, 220);
+    lv_slider_set_range(gain_slider, 0, 42); // 0 to 42 dB range
+    lv_slider_set_value(gain_slider, (int)current_mic_gain, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(gain_slider, lv_color_hex(0x333333), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(gain_slider, lv_color_hex(0x00E0FF), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(gain_slider, lv_color_hex(0xFFFFFF), LV_PART_KNOB);
+    lv_obj_add_event_cb(gain_slider, slider_event_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    
+    // Gain value text
+    gain_val_lbl = lv_label_create(settings_modal);
+    lv_label_set_text_fmt(gain_val_lbl, "%+d dB", (int)current_mic_gain);
+    lv_obj_set_style_text_font(gain_val_lbl, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(gain_val_lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(gain_val_lbl, LV_ALIGN_TOP_MID, 0, 270);
+    
+    // Live Level Label
+    lv_obj_t *lbl_level_title = lv_label_create(settings_modal);
+    lv_label_set_text(lbl_level_title, "Live Input Level");
+    lv_obj_set_style_text_color(lbl_level_title, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(lbl_level_title, &lv_font_montserrat_20, 0);
+    lv_obj_align(lbl_level_title, LV_ALIGN_TOP_MID, 0, 360);
+    
+    // Live Level Meter
+    setting_level_bar = lv_bar_create(settings_modal);
+    lv_obj_set_size(setting_level_bar, PLOT_W - 40, 20);
+    lv_obj_align(setting_level_bar, LV_ALIGN_TOP_MID, 0, 400);
+    lv_bar_set_range(setting_level_bar, 0, 100);
+    lv_obj_set_style_bg_color(setting_level_bar, lv_color_hex(0x222222), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(setting_level_bar, lv_color_hex(0x00C070), LV_PART_INDICATOR);
+    
+    // Close Button
+    lv_obj_t *btn_close = lv_button_create(settings_modal);
+    lv_obj_set_size(btn_close, 180, 50);
+    lv_obj_align(btn_close, LV_ALIGN_BOTTOM_MID, 0, -100);
+    lv_obj_set_style_bg_color(btn_close, lv_color_hex(0xFF4060), 0);
+    lv_obj_set_style_bg_color(btn_close, lv_color_hex(0xD02040), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn_close, 25, 0);
+    
+    lv_obj_t *lbl_close = lv_label_create(btn_close);
+    lv_label_set_text(lbl_close, "Save & Close");
+    lv_obj_set_style_text_color(lbl_close, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(lbl_close, &lv_font_montserrat_20, 0);
+    lv_obj_align(lbl_close, LV_ALIGN_CENTER, 0, 0);
+    
+    lv_obj_add_event_cb(btn_close, close_click_cb, LV_EVENT_CLICKED, NULL);
+}
 
 static void build_ui(void)
 {
@@ -95,6 +234,24 @@ static void build_ui(void)
         lv_obj_set_align(peaks[i], LV_ALIGN_BOTTOM_LEFT);
         lv_obj_set_pos(peaks[i], i * pitch, 0);
     }
+
+    // Create Settings Button on the main screen (top right)
+    lv_obj_t *btn_settings = lv_button_create(scr);
+    lv_obj_set_size(btn_settings, 70, 70);
+    lv_obj_align(btn_settings, LV_ALIGN_TOP_RIGHT, -MARGIN, MARGIN);
+    lv_obj_set_style_bg_color(btn_settings, lv_color_hex(0x222222), 0);
+    lv_obj_set_style_bg_color(btn_settings, lv_color_hex(0x333333), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn_settings, 14, 0);
+    lv_obj_set_style_border_width(btn_settings, 1, 0);
+    lv_obj_set_style_border_color(btn_settings, lv_color_hex(0x555555), 0);
+    lv_obj_set_style_border_color(btn_settings, lv_color_hex(0x00E0FF), LV_STATE_PRESSED);
+    
+    lv_obj_t *lbl_settings = lv_label_create(btn_settings);
+    lv_label_set_text(lbl_settings, LV_SYMBOL_SETTINGS);
+    lv_obj_set_style_text_font(lbl_settings, &lv_font_montserrat_28, 0);
+    lv_obj_align(lbl_settings, LV_ALIGN_CENTER, 0, 0);
+    
+    lv_obj_add_event_cb(btn_settings, settings_click_cb, LV_EVENT_CLICKED, NULL);
 }
 
 static void compute_band_ranges(void)
@@ -173,6 +330,9 @@ static void analyze_and_draw(const int16_t *raw)
     }
 
     lv_bar_set_value(level_bar, (int)(db_frac(rms) * 100), LV_ANIM_OFF);
+    if (setting_level_bar) {
+        lv_bar_set_value(setting_level_bar, (int)(db_frac(rms) * 100), LV_ANIM_OFF);
+    }
 
     if (listening) {
         lv_label_set_text_fmt(lbl_freq, "%d Hz", (int)(dom * BIN_HZ));
@@ -200,6 +360,16 @@ static void audio_task(void *arg)
 
 void app_main(void)
 {
+    // Initialize NVS for persisting mic sensitivity
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    load_gain_from_nvs();
+
     dsps_fft2r_init_fc32(NULL, FFT_N);
     for (int i = 0; i < FFT_N; i++)
         hann[i] = 0.5f * (1 - cosf(2 * M_PI * i / (FFT_N - 1)));
@@ -210,6 +380,7 @@ void app_main(void)
     build_ui();
     bsp_lvgl_unlock();
 
-    esp_codec_dev_handle_t mic = bsp_mic_start();
-    xTaskCreatePinnedToCore(audio_task, "audio", 8192, mic, 5, NULL, 1);
+    mic_handle = bsp_mic_start();
+    esp_codec_dev_set_in_gain(mic_handle, current_mic_gain);
+    xTaskCreatePinnedToCore(audio_task, "audio", 8192, mic_handle, 5, NULL, 1);
 }
