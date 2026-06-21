@@ -71,7 +71,7 @@ v6.1-dev / 6.2 toolchain). Values marked _(vendor pkg)_ come from the official
 Bus: SDIO **slot 1, 4-bit, 40 MHz**. These match the esp_hosted ESP32-C6
 defaults, so no pin overrides are needed.
 
-### microSD — SDMMC _(vendor pkg)_
+### microSD — SDMMC _(vendor pkg; verified)_
 | Signal | GPIO |
 |---|---|
 | CLK | **43** |
@@ -80,6 +80,37 @@ defaults, so no pin overrides are needed.
 | D1 | **40** |
 | D2 | **41** |
 | D3 | **42** |
+
+Bus: SDMMC **4-bit**, custom GPIO matrix pins (not the IOMUX defaults).
+Verified at `SDMMC_FREQ_DEFAULT` (20 MHz) — SDHC card mounted, read+write OK.
+
+> ⚠️ **Slot conflict with Wi-Fi.** The P4's SDMMC peripheral has two slots and the
+> C6 Wi-Fi (esp_hosted, §7) uses **slot 1** over SDIO. `SDMMC_HOST_DEFAULT()` also
+> defaults to slot 1, so a card + Wi-Fi app fails to mount with:
+> ```
+> SD_HOST: sd_host_sdmmc_controller_add_slot(165): slot is not available
+> vfs_fat_sdmmc: slot init failed (0x103)   # ESP_ERR_INVALID_STATE
+> ```
+> Put the **SD card on slot 0** when Wi-Fi is also in use (the GPIO-matrix pins
+> above work on either slot):
+> ```c
+> sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+> host.slot = SDMMC_HOST_SLOT_0;   // slot 1 is the C6 Wi-Fi
+> ```
+> SD-only projects (no Wi-Fi) can stay on the default slot 1.
+
+> ⚠️ **SD IO power is on an on-chip LDO (channel 4).** The ESP32-P4 reports
+> `SOC_SDMMC_IO_POWER_EXTERNAL`, so the SD signal pins have **no power** until you
+> bring up LDO ch4 and hand the handle to the host. Skip it and the card never
+> responds — `sdmmc_init_ocr: send_op_cond (1) returned 0x107` (ESP_ERR_TIMEOUT),
+> which looks exactly like "wrong pins" but isn't. Required init:
+> ```c
+> sd_pwr_ctrl_ldo_config_t ldo = { .ldo_chan_id = 4 };
+> sd_pwr_ctrl_handle_t h = NULL;
+> sd_pwr_ctrl_new_on_chip_ldo(&ldo, &h);
+> host.pwr_ctrl_handle = h;   // host = SDMMC_HOST_DEFAULT()
+> ```
+> (Display DSI uses LDO ch3 @ 2500 mV; SD uses ch4 — different channels.)
 
 ---
 
@@ -270,6 +301,10 @@ CONFIG_LVGL_PORT_ENABLE_PPA=y
 - [ ] **No sound** → ES8311 needs I²C init (use `esp_codec_dev`) and the PA pin
       (GPIO11) high; it shares the touch I²C bus (§6).
 - [ ] **Touch offset/mirrored** → flip swap/mirror flags to match your rotation (§5).
+- [ ] **SD card won't mount / `send_op_cond ... 0x107` timeout** → SD IO power is on
+      on-chip LDO **ch4**; init it and set `host.pwr_ctrl_handle` (§2, microSD).
+- [ ] **SD `slot is not available` / `slot init failed (0x103)` with Wi-Fi on** →
+      the C6 uses SDMMC slot 1; move the card to `host.slot = SDMMC_HOST_SLOT_0` (§2, microSD).
 
 ---
 

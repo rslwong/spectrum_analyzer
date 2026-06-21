@@ -80,6 +80,47 @@ With `avoid_tearing` off you can set the DPI panel's `num_fbs = 1` (saves a
 768 KB framebuffer). Re-enable tear-free only once `esp_lvgl_port` registers
 `on_frame_buf_complete` for DSI.
 
+### `esp_lcd_dpi_panel_config_t` changed in v6.0 (DPI bring-up gotchas)
+
+The MIPI-DPI panel config struct was reworked in IDF 6.0. Code written against
+5.x fails to compile with errors like *"has no member named `pixel_format`"* and
+*"too many arguments to `esp_lcd_dpi_panel_enable_dma2d`"*. Three changes:
+
+1. **`.pixel_format` was split into `.in_color_format` + `.out_color_format`**,
+   typed `lcd_color_format_t` (e.g. `LCD_COLOR_FMT_RGB565`, not the old
+   `LCD_COLOR_PIXEL_FORMAT_RGB565`).
+2. **`.flags.use_dma2d` was removed.** Enable DMA2D with a function call instead.
+3. **`esp_lcd_dpi_panel_enable_dma2d()` takes only the panel handle** — no `bool`.
+
+5.x → 6.0:
+
+```c
+// OLD (IDF 5.x):
+esp_lcd_dpi_panel_config_t dpi = {
+    .pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565,
+    .flags.use_dma2d = true,
+    /* ... */
+};
+
+// NEW (IDF 6.0+):
+esp_lcd_dpi_panel_config_t dpi = {
+    .in_color_format  = LCD_COLOR_FMT_RGB565,
+    .out_color_format = LCD_COLOR_FMT_RGB565,
+    /* ... no use_dma2d flag ... */
+};
+esp_lcd_new_panel_st7701(io, &panel_cfg, &panel);
+esp_lcd_panel_reset(panel);
+esp_lcd_panel_init(panel);
+esp_lcd_dpi_panel_enable_dma2d(panel);          // panel handle only
+esp_lcd_panel_disp_on_off(panel, true);
+```
+
+(The `enable_dma2d` step is the one already listed in `JC4880P443C-BOARD.md` §4.)
+
+A harmless `'on_refresh_done' is deprecated` **warning** from `esp_lvgl_port`'s
+`lvgl_port_add_disp_dsi` is expected on 6.x and does not stop the build — see the
+`avoid_tearing` note above.
+
 ### Benign noise you can ignore on this board
 
 These print during a healthy bring-up — not errors:
