@@ -1,0 +1,28 @@
+# Guition JC4880P443C-I-W (ESP32-P4 rev v1.x). See JC4880P443C-BOARD.md / ESP-IDF.md.
+CONFIG_IDF_TARGET="esp32p4"
+
+# --- ESP32-P4 v1.x silicon: won't boot without these (§3) -------------------
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_100=y
+
+# --- Flash 16 MB (Boya chip; enable its driver to silence the generic warning)
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_SPI_FLASH_SUPPORT_BOYA_CHIP=y
+
+# --- PSRAM 32 MB, XIP (framebuffers + FFT buffers live here) (§8) -----------
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_HEX=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+
+# --- Partition table moved for the XIP bootloader (§8) ----------------------
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x10000
+
+# --- Bigger main task stack for FFT setup -----------------------------------
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+
+# --- Fonts used by the UI ---------------------------------------------------
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y

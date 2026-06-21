@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(unzip -l JC4880P443C_I_W.zip)",
+      "Bash(grep -iE \"idf_examples|\\\\.c$|\\\\.h$|sdkconfig|partition|CMake|idf_component\")"
+    ]
+  }
+}

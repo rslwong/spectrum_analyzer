@@ -1,0 +1,6 @@
+# Name,   Type, SubType, Offset,   Size
+# Table is at 0x10000 (PSRAM-XIP bootloader is too big for 0x8000); app must be
+# 0x10000-aligned. See JC4880P443C-BOARD.md §8.
+nvs,      data, nvs,     0x11000,  0x6000,
+phy_init, data, phy,     0x17000,  0x1000,
+factory,  app,  factory, 0x20000,  4M,
